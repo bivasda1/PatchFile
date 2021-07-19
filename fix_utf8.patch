@@ -1,0 +1,401 @@
+From 89a69b3b9fda5e7911501ba8b6feb4b8e8abc307 Mon Sep 17 00:00:00 2001
+From: root <root@erratic1.fyre.ibm.com>
+Date: Mon, 19 Jul 2021 10:33:13 -0700
+Subject: [PATCH] Added power support
+
+---
+ buildSrc/build.gradle                         |  4 +++-
+ .../gradle/plugin/PluginBuildPlugin.groovy    |  2 +-
+ .../elasticsearch/gradle/Architecture.java    |  5 ++++-
+ .../java/org/elasticsearch/gradle/Jdk.java    |  2 +-
+ .../gradle/JdkDownloadPluginTests.java        |  2 +-
+ distribution/archives/build.gradle            | 14 +++++++++++++
+ distribution/build.gradle                     |  4 ++--
+ distribution/docker/build.gradle              | 21 +++++++++++++++----
+ distribution/packages/build.gradle            | 20 +++++++++++++++++-
+ server/build.gradle                           |  2 +-
+ server/licenses/jna-5.5.0.jar.sha1            |  2 +-
+ settings.gradle                               | 11 ++++++++++
+ x-pack/plugin/sql/qa/server/build.gradle      |  4 ++--
+ x-pack/plugin/sql/sql-cli/build.gradle        |  2 +-
+ .../sql/sql-cli/licenses/jna-5.5.0.jar.sha1   |  2 +-
+ 15 files changed, 79 insertions(+), 18 deletions(-)
+
+diff --git a/buildSrc/build.gradle b/buildSrc/build.gradle
+index e5611bd99ad..be23694e1bb 100644
+--- a/buildSrc/build.gradle
++++ b/buildSrc/build.gradle
+@@ -86,7 +86,7 @@ dependencies {
+   api 'com.netflix.nebula:nebula-publishing-plugin:4.4.4'
+   api 'com.netflix.nebula:gradle-info-plugin:9.1.1'
+   api 'org.apache.rat:apache-rat:0.11'
+-  api "org.elasticsearch:jna:5.5.0"
++  api "net.java.dev.jna:jna:5.5.0"
+   api 'com.github.jengelman.gradle.plugins:shadow:6.1.0'
+   api 'de.thetaphi:forbiddenapis:3.1'
+   api 'com.avast.gradle:gradle-docker-compose-plugin:0.13.4'
+@@ -171,6 +171,8 @@ if (project != rootProject) {
+     distribution project(':distribution:archives:linux-tar')
+     distribution project(':distribution:archives:oss-linux-tar')
+     distribution project(':distribution:archives:oss-linux-aarch64-tar')
++    distribution project(':distribution:archives:linux-ppc64le-tar')
++    distribution project(':distribution:archives:oss-linux-ppc64le-tar')
+ 
+     integTestRuntimeOnly(project(":libs:elasticsearch-core"))
+   }
+diff --git a/buildSrc/src/main/groovy/org/elasticsearch/gradle/plugin/PluginBuildPlugin.groovy b/buildSrc/src/main/groovy/org/elasticsearch/gradle/plugin/PluginBuildPlugin.groovy
+index b896e8a8dba..0abb8a3928d 100644
+--- a/buildSrc/src/main/groovy/org/elasticsearch/gradle/plugin/PluginBuildPlugin.groovy
++++ b/buildSrc/src/main/groovy/org/elasticsearch/gradle/plugin/PluginBuildPlugin.groovy
+@@ -191,7 +191,7 @@ class PluginBuildPlugin implements Plugin<Project> {
+             compileOnly "org.locationtech.jts:jts-core:${project.versions.jts}"
+             compileOnly "org.apache.logging.log4j:log4j-api:${project.versions.log4j}"
+             compileOnly "org.apache.logging.log4j:log4j-core:${project.versions.log4j}"
+-            compileOnly "org.elasticsearch:jna:${project.versions.jna}"
++            compileOnly "net.java.dev.jna:jna:${project.versions.jna}"
+         }
+     }
+ 
+diff --git a/buildSrc/src/main/java/org/elasticsearch/gradle/Architecture.java b/buildSrc/src/main/java/org/elasticsearch/gradle/Architecture.java
+index c9a7e1eeb8e..08b14867fad 100644
+--- a/buildSrc/src/main/java/org/elasticsearch/gradle/Architecture.java
++++ b/buildSrc/src/main/java/org/elasticsearch/gradle/Architecture.java
+@@ -11,7 +11,8 @@ package org.elasticsearch.gradle;
+ public enum Architecture {
+ 
+     X64,
+-    AARCH64;
++    AARCH64,
++    PPC64LE;
+ 
+     public static Architecture current() {
+         final String architecture = System.getProperty("os.arch", "");
+@@ -21,6 +22,8 @@ public enum Architecture {
+                 return X64;
+             case "aarch64":
+                 return AARCH64;
++            case "PPC64LE":
++                return PPC64LE;
+             default:
+                 throw new IllegalArgumentException("can not determine architecture from [" + architecture + "]");
+         }
+diff --git a/buildSrc/src/main/java/org/elasticsearch/gradle/Jdk.java b/buildSrc/src/main/java/org/elasticsearch/gradle/Jdk.java
+index c9d2f8a0f70..0948f83af65 100644
+--- a/buildSrc/src/main/java/org/elasticsearch/gradle/Jdk.java
++++ b/buildSrc/src/main/java/org/elasticsearch/gradle/Jdk.java
+@@ -24,7 +24,7 @@ import java.util.regex.Pattern;
+ 
+ public class Jdk implements Buildable, Iterable<File> {
+ 
+-    private static final List<String> ALLOWED_ARCHITECTURES = Collections.unmodifiableList(Arrays.asList("aarch64", "x64"));
++    private static final List<String> ALLOWED_ARCHITECTURES = Collections.unmodifiableList(Arrays.asList("aarch64", "x64", "ppc64le"));
+     private static final List<String> ALLOWED_VENDORS = Collections.unmodifiableList(Arrays.asList("adoptopenjdk", "openjdk"));
+     private static final List<String> ALLOWED_PLATFORMS = Collections.unmodifiableList(Arrays.asList("darwin", "linux", "windows", "mac"));
+     private static final Pattern VERSION_PATTERN = Pattern.compile("(\\d+)(\\.\\d+\\.\\d+)?\\+(\\d+(?:\\.\\d+)?)(@([a-f0-9]{32}))?");
+diff --git a/buildSrc/src/test/java/org/elasticsearch/gradle/JdkDownloadPluginTests.java b/buildSrc/src/test/java/org/elasticsearch/gradle/JdkDownloadPluginTests.java
+index b1065715442..f7ab1e7b2ef 100644
+--- a/buildSrc/src/test/java/org/elasticsearch/gradle/JdkDownloadPluginTests.java
++++ b/buildSrc/src/test/java/org/elasticsearch/gradle/JdkDownloadPluginTests.java
+@@ -84,7 +84,7 @@ public class JdkDownloadPluginTests extends GradleUnitTestCase {
+             "11.0.2+33",
+             "linux",
+             "unknown",
+-            "unknown architecture [unknown] for jdk [testjdk], must be one of [aarch64, x64]"
++            "unknown architecture [unknown] for jdk [testjdk], must be one of [aarch64, x64, ppc64le]"
+         );
+     }
+ 
+diff --git a/distribution/archives/build.gradle b/distribution/archives/build.gradle
+index 49ab50b1718..0668cbc3c0d 100644
+--- a/distribution/archives/build.gradle
++++ b/distribution/archives/build.gradle
+@@ -132,6 +132,13 @@ distribution_archives {
+     }
+   }
+ 
++linuxPpc64leTar {
++    archiveClassifier = 'linux-ppc64le'
++    content {
++      archiveFiles(modulesFiles(false, 'linux-ppc64le'), 'tar', 'linux', 'ppc64le', false, true)
++    }
++  }
++
+   linuxTar {
+     archiveClassifier = 'linux-x86_64'
+     content {
+@@ -146,6 +153,13 @@ distribution_archives {
+     }
+   }
+ 
++  ossLinuxPpc64leTar {
++    archiveClassifier = 'linux-ppc64le'
++    content {
++      archiveFiles(modulesFiles(true, 'linux-ppc64le'), 'tar', 'linux', 'ppc64le', true, true)
++    }
++  }
++
+   ossLinuxTar {
+     archiveClassifier = 'linux-x86_64'
+     content {
+diff --git a/distribution/build.gradle b/distribution/build.gradle
+index 3e905c3e880..ea4748053b7 100644
+--- a/distribution/build.gradle
++++ b/distribution/build.gradle
+@@ -293,7 +293,7 @@ configure(subprojects.findAll { ['archives', 'packages'].contains(it.name) }) {
+   // Setup all required JDKs
+   project.jdks {
+     ['darwin', 'windows', 'linux'].each { platform ->
+-      (platform == 'linux' ? ['x64', 'aarch64'] : ['x64']).each { architecture ->
++      (platform == 'linux' ? ['x64', 'aarch64', 'ppc64le'] : ['x64']).each { architecture ->
+         "bundled_${platform}_${architecture}" {
+           it.platform = platform
+           it.version = VersionProperties.getBundledJdk(platform)
+@@ -372,7 +372,7 @@ configure(subprojects.findAll { ['archives', 'packages'].contains(it.name) }) {
+         } else {
+           buildModules = buildDefaultModulesTaskProvider
+         }
+-        List excludePlatforms = ['linux-x86_64', 'linux-aarch64', 'windows-x86_64', 'darwin-x86_64']
++        List excludePlatforms = ['linux-x86_64', 'linux-aarch64', 'linux-ppc64le', 'windows-x86_64', 'darwin-x86_64']
+         if (platform != null) {
+           excludePlatforms.remove(excludePlatforms.indexOf(platform))
+         } else {
+diff --git a/distribution/docker/build.gradle b/distribution/docker/build.gradle
+index 7e434e9469c..eaf0c7c2596 100644
+--- a/distribution/docker/build.gradle
++++ b/distribution/docker/build.gradle
+@@ -20,15 +20,19 @@ testFixtures.useFixture()
+ configurations {
+   aarch64DockerSource
+   dockerSource
++  ppc64leDockerSource
+   aarch64OssDockerSource
++  ppc64leOssDockerSource
+   ossDockerSource
+   transformLog4jJar
+ }
+ 
+ dependencies {
+   aarch64DockerSource project(path: ":distribution:archives:linux-aarch64-tar", configuration:"default")
++  ppc64leDockerSource project(path: ":distribution:archives:linux-ppc64le-tar")
+   dockerSource project(path: ":distribution:archives:linux-tar", configuration:"default")
+   aarch64OssDockerSource project(path: ":distribution:archives:oss-linux-aarch64-tar", configuration:"default")
++  ppc64leOssDockerSource project(path: ":distribution:archives:oss-linux-ppc64le-tar")
+   ossDockerSource project(path: ":distribution:archives:oss-linux-tar", configuration:"default")
+   transformLog4jJar project(path: ":distribution:docker:transform-log4j-config", configuration: "default")
+ }
+@@ -107,7 +111,7 @@ class SquashNewlinesFilter extends FilterReader {
+ 
+ private static String buildPath(Architecture architecture, boolean oss, DockerBase base) {
+   return 'build/' +
+-    (architecture == Architecture.AARCH64 ? 'aarch64-' : '') +
++    (architecture == Architecture.AARCH64 ? 'aarch64-' : architecture == Architecture.PPC64LE ? 'ppc64le-' : '') +
+     (oss ? 'oss-' : '') +
+     (base == DockerBase.UBI ? 'ubi-' : '') +
+     (base == DockerBase.UBI ? 'ubi-' : (base == DockerBase.IRON_BANK ? 'ironbank-' : '')) +
+@@ -116,7 +120,7 @@ private static String buildPath(Architecture architecture, boolean oss, DockerBa
+ 
+ private static String taskName(String prefix, Architecture architecture, boolean oss, DockerBase base, String suffix) {
+   return prefix +
+-    (architecture == Architecture.AARCH64 ? 'Aarch64' : '') +
++    (architecture == Architecture.AARCH64 ? 'Aarch64' : architecture == Architecture.PPC64LE ? 'ppc64le-' : '') +
+     (oss ? 'Oss' : '') +
+     (base == DockerBase.UBI ? 'Ubi' : (base == DockerBase.IRON_BANK ? 'IronBank' : '')) +
+     suffix
+@@ -194,7 +198,16 @@ void addCopyDockerContextTask(Architecture architecture, boolean oss, DockerBase
+     if (architecture == Architecture.AARCH64) {
+       if (oss) {
+         from configurations.aarch64OssDockerSource
+-      } else {
++    } else {
++        from configurations.aarch64DockerSource
++      }
++    } else if ("ppc64le".equals(architecture)) {
++      if (oss){
++        from configurations.ppc64leOssDockerSource
++    } else {
++        from configurations.ppc64leDockerSource
++      }
++    } else {
+         from configurations.aarch64DockerSource
+       }
+     } else {
+@@ -232,7 +245,7 @@ tasks.register("copyNodeKeyMaterial", Sync) {
+ elasticsearch_distributions {
+   Architecture.values().each { eachArchitecture ->
+     Flavor.values().each { distroFlavor ->
+-      "docker_$distroFlavor${ eachArchitecture == Architecture.AARCH64 ? '_aarch64' : '' }" {
++      "docker_$distroFlavor${ eachArchitecture == Architecture.AARCH64 ? '_aarch64' :  eachArchitecture == Architecture.PPC64LE ? '_ppc64le' : '' }" {
+         architecture = eachArchitecture
+         flavor = distroFlavor
+         type = 'docker'
+diff --git a/distribution/packages/build.gradle b/distribution/packages/build.gradle
+index f34a363cde1..3aa7b789f33 100644
+--- a/distribution/packages/build.gradle
++++ b/distribution/packages/build.gradle
+@@ -102,11 +102,15 @@ Closure commonPackageConfig(String type, boolean oss, boolean jdk, String archit
+       } else {
+         assert architecture == 'aarch64' : architecture
+         arch('arm64')
++      } else if (architecture == 'ppc64le') {
++        arch('ppc64le')
+       }
+     } else {
+       assert type == 'rpm' : type
+       if (architecture == 'x64') {
+         arch('X86_64')
++      } else if (architecture == 'ppc64le') {
++        arch('ppc64le')
+       } else {
+         assert architecture == 'aarch64' : architecture
+         arch('aarch64')
+@@ -145,7 +149,7 @@ Closure commonPackageConfig(String type, boolean oss, boolean jdk, String archit
+         with libFiles(oss)
+       }
+       into('modules') {
+-        with modulesFiles(oss, 'linux-' + ((architecture == 'x64') ? 'x86_64' : architecture))
++        with modulesFiles(oss, 'linux-' + ((architecture == 'x64') ? 'x86_64' : (architecture == 'ppc64le')? 'ppc64le' : architecture))
+       }
+       if (jdk) {
+         into('jdk') {
+@@ -346,6 +350,13 @@ tasks.register('buildAarch64Deb', Deb) {
+   configure(commonDebConfig(false, true, 'aarch64'))
+ }
+ 
++tasks.register('buildPpc64leDeb', Deb) {
++  configure(commonDebConfig(false, true, 'ppc64le'))
++}
++
++tasks.register('buildPpc64leOssDeb', Deb) {
++  configure(commonDebConfig(true, true, 'Ppc64le'))
++}
+ tasks.register('buildDeb', Deb) {
+   configure(commonDebConfig(false, true, 'x64'))
+ }
+@@ -399,6 +410,13 @@ tasks.register('buildAarch64Rpm', Rpm) {
+   configure(commonRpmConfig(false, true, 'aarch64'))
+ }
+ 
++tasks.register('buildPpc64leRpm', Rpm) {
++  configure(commonRpmConfig(false, true, 'ppc64le'))
++}
++
++tasks.register('buildPpc64leOssRpm', Rpm) {
++  configure(commonRpmConfig(true, true, 'ppc64le'))
++}
+ tasks.register('buildRpm', Rpm) {
+   configure(commonRpmConfig(false, true, 'x64'))
+ }
+diff --git a/server/build.gradle b/server/build.gradle
+index 69343342d65..cd15493adc8 100644
+--- a/server/build.gradle
++++ b/server/build.gradle
+@@ -109,7 +109,7 @@ dependencies {
+   api "org.apache.logging.log4j:log4j-core:${versions.log4j}", optional
+ 
+   // repackaged jna with native bits linked against all elastic supported platforms
+-  api "org.elasticsearch:jna:${versions.jna}"
++  api "net.java.dev.jna:jna:${versions.jna}"
+ 
+   testImplementation(project(":test:framework")) {
+     // tests use the locally compiled version of server
+diff --git a/server/licenses/jna-5.5.0.jar.sha1 b/server/licenses/jna-5.5.0.jar.sha1
+index 903d2bd4cd9..5621dfc743d 100644
+--- a/server/licenses/jna-5.5.0.jar.sha1
++++ b/server/licenses/jna-5.5.0.jar.sha1
+@@ -1 +1 @@
+-ade077cbb2618a18bfc6c335413b2b7163d97601
+\ No newline at end of file
++0e0845217c4907822403912ad6828d8e0b256208
+diff --git a/settings.gradle b/settings.gradle
+index eba6a72456e..5788fac9de0 100644
+--- a/settings.gradle
++++ b/settings.gradle
+@@ -27,14 +27,20 @@ List projects = [
+   'distribution:archives:oss-no-jdk-darwin-tar',
+   'distribution:archives:no-jdk-darwin-tar',
+   'distribution:archives:oss-linux-aarch64-tar',
++  'distribution:archives:oss-linux-ppc64le-tar',
+   'distribution:archives:oss-linux-tar',
+   'distribution:archives:linux-aarch64-tar',
++  'distribution:archives:linux-ppc64le-tar',
+   'distribution:archives:linux-tar',
+   'distribution:archives:oss-no-jdk-linux-tar',
+   'distribution:archives:no-jdk-linux-tar',
+   'distribution:docker',
+   'distribution:docker:docker-aarch64-build-context',
+   'distribution:docker:docker-aarch64-export',
++  'distribution:docker:docker-ppc64le-build-context',
++  'distribution:docker:docker-ppc64le-export',
++  'distribution:docker:oss-docker-ppc64le-build-context',
++  'distribution:docker:oss-docker-ppc64le-export',
+   'distribution:docker:docker-build-context',
+   'distribution:docker:docker-export',
+   'distribution:docker:ironbank-docker-build-context',
+@@ -46,16 +52,21 @@ List projects = [
+   'distribution:docker:ubi-docker-aarch64-export',
+   'distribution:docker:ubi-docker-build-context',
+   'distribution:docker:ubi-docker-export',
++  'distribution:docker:ubi-docker-ppc64le-export',
+   'distribution:packages:aarch64-oss-deb',
+   'distribution:packages:oss-deb',
+   'distribution:packages:aarch64-deb',
++  'distribution:packages:ppc64le-oss-deb',
+   'distribution:packages:deb',
+   'distribution:packages:oss-no-jdk-deb',
++  'distribution:packages:ppc64le-deb',
+   'distribution:packages:no-jdk-deb',
+   'distribution:packages:aarch64-oss-rpm',
+   'distribution:packages:oss-rpm',
++  'distribution:packages:ppc64le-oss-rpm',
+   'distribution:packages:aarch64-rpm',
+   'distribution:packages:rpm',
++  'distribution:packages:ppc64le-rpm',
+   'distribution:packages:oss-no-jdk-rpm',
+   'distribution:packages:no-jdk-rpm',
+   'distribution:bwc:bugfix',
+diff --git a/x-pack/plugin/sql/qa/server/build.gradle b/x-pack/plugin/sql/qa/server/build.gradle
+index 82d8d5e5423..cc11caeb66a 100644
+--- a/x-pack/plugin/sql/qa/server/build.gradle
++++ b/x-pack/plugin/sql/qa/server/build.gradle
+@@ -32,7 +32,7 @@ dependencies {
+   api "org.jline:jline-reader:${jlineVersion}"
+   api "org.jline:jline-style:${jlineVersion}"
+ 
+-  testRuntimeOnly "org.elasticsearch:jna:${versions.jna}"
++  testRuntimeOnly "net.java.dev.jna:jna:${versions.jna}"
+ }
+ 
+ // this is just a test fixture used by other projects and not in production
+@@ -95,7 +95,7 @@ subprojects {
+     testRuntimeOnly "org.jline:jline-reader:${jlineVersion}"
+     testRuntimeOnly "org.jline:jline-style:${jlineVersion}"
+ 
+-    testRuntimeOnly "org.elasticsearch:jna:${versions.jna}"
++    testRuntimeOnly "net.java.dev.jna:jna:${versions.jna}"
+ 
+     // spatial dependency
+     testRuntimeOnly project(path: xpackModule('spatial'))
+diff --git a/x-pack/plugin/sql/sql-cli/build.gradle b/x-pack/plugin/sql/sql-cli/build.gradle
+index a30a38b2e6d..73670c2c594 100644
+--- a/x-pack/plugin/sql/sql-cli/build.gradle
++++ b/x-pack/plugin/sql/sql-cli/build.gradle
+@@ -30,7 +30,7 @@ dependencies {
+   api xpackProject('plugin:sql:sql-action')
+   api project(":libs:elasticsearch-cli")
+   api project(':libs:elasticsearch-x-content')
+-  runtimeOnly "org.elasticsearch:jna:${versions.jna}"
++  runtimeOnly "net.java.dev.jna:jna:${versions.jna}"
+   testImplementation project(":test:framework")
+ }
+ 
+diff --git a/x-pack/plugin/sql/sql-cli/licenses/jna-5.5.0.jar.sha1 b/x-pack/plugin/sql/sql-cli/licenses/jna-5.5.0.jar.sha1
+index 903d2bd4cd9..5621dfc743d 100644
+--- a/x-pack/plugin/sql/sql-cli/licenses/jna-5.5.0.jar.sha1
++++ b/x-pack/plugin/sql/sql-cli/licenses/jna-5.5.0.jar.sha1
+@@ -1 +1 @@
+-ade077cbb2618a18bfc6c335413b2b7163d97601
+\ No newline at end of file
++0e0845217c4907822403912ad6828d8e0b256208
+-- 
+2.27.0
+
